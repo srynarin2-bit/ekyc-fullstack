@@ -1,0 +1,19 @@
+{
+  "expo": {
+    "name": "eKYC Demo",
+    "slug": "ekyc-demo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "light",
+    "android": {
+      "usesCleartextTraffic": true
+    },
+    "ios": {
+      "infoPlist": {
+        "NSAppTransportSecurity": {
+          "NSAllowsLocalLoads": true
+        }
+      }
+    }
+  }
+}
