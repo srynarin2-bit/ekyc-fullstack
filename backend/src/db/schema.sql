@@ -41,6 +41,16 @@ CREATE TABLE IF NOT EXISTS kyc_audit_logs (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS users (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  kyc_session_id UUID UNIQUE NOT NULL REFERENCES kyc_sessions(id),
+  email VARCHAR(255) UNIQUE NOT NULL,
+  password_hash TEXT NOT NULL,
+  full_name TEXT NOT NULL,
+  doc_number VARCHAR(128) NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 CREATE INDEX IF NOT EXISTS idx_kyc_sessions_user_id ON kyc_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_kyc_documents_session_id ON kyc_documents(session_id);
 CREATE INDEX IF NOT EXISTS idx_kyc_biometrics_session_id ON kyc_biometric_checks(session_id);

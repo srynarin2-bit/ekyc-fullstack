@@ -11,6 +11,18 @@ export interface KycSession {
   updated_at: string;
 }
 
+export interface ExtractedOcrResponse {
+  storageKey: string;
+  extracted: {
+    rawText: string;
+    fullName: string;
+    docNumber: string;
+    dateOfBirth: string;
+    expiryDate: string;
+    ocrConfidence: number;
+  };
+}
+
 export interface AuditLogEntry {
   id: number;
   session_id: string;
@@ -20,19 +32,11 @@ export interface AuditLogEntry {
   created_at: string;
 }
 
-export interface SubmitKycPayload {
-  docType: DocType;
-  storageKey: string;
-  document: {
-    fullName: string;
-    docNumber: string;
-    dateOfBirth: string;
-    expiryDate: string;
-    ocrConfidence: number;
-  };
-  biometrics: {
-    livenessPassed: boolean;
-    livenessScore: number;
-    faceMatchScore: number;
-  };
+export interface RegisteredUser {
+  id: string;
+  kyc_session_id: string;
+  email: string;
+  full_name: string;
+  doc_number: string;
+  created_at: string;
 }
