@@ -13,7 +13,7 @@ const openAccountSchema = z.object({
 bankRouter.post("/accounts/open", async (req, res) => {
   const parsed = openAccountSchema.safeParse(req.body);
   if (!parsed.success) {
-    return res.status(400).json({ error: "Invalid bank account request", details: parsed.error.flatten() });
+    return res.status(400).json({ error: "Invalid bank account payload", details: parsed.error.flatten() });
   }
 
   const { userId, kycSessionId, currency } = parsed.data;
@@ -34,11 +34,12 @@ bankRouter.post("/accounts/open", async (req, res) => {
     if (kycCheck.rowCount === 0 || kycCheck.rows[0].status !== "APPROVED") {
       await client.query("ROLLBACK");
       return res.status(403).json({
-        error: "Bank account creation denied: eKYC verification must be APPROVED first.",
+        error: "Bank account creation blocked: verified and APPROVED eKYC is required.",
       });
     }
 
-    const accountNumber = `${currency === "USD" ? "840" : "116"}${Date.now().toString().slice(-9)}`;
+    const prefix = currency === "USD" ? "840" : "116";
+    const accountNumber = `${prefix}${Date.now().toString().slice(-9)}`;
 
     const created = await client.query(
       `INSERT INTO bank_accounts (user_id, kyc_session_id, account_number, currency, balance, status)
@@ -55,13 +56,13 @@ bankRouter.post("/accounts/open", async (req, res) => {
 
     await client.query("COMMIT");
     return res.status(201).json({
-      message: "Verified bank account opened",
+      message: "Bank account opened successfully",
       account: created.rows[0],
     });
   } catch (err: any) {
     await client.query("ROLLBACK");
     if (err?.code === "23505") {
-      return res.status(409).json({ error: "A bank account already exists for this verified eKYC session" });
+      return res.status(409).json({ error: "A bank account already exists for this eKYC session" });
     }
     console.error("Open bank account error:", err);
     return res.status(500).json({ error: "Failed to open bank account" });

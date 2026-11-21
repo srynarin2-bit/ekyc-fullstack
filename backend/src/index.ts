@@ -3,6 +3,7 @@ import express from "express";
 import { env } from "./config/env.js";
 import { pool } from "./db/pool.js";
 import { authRouter } from "./routes/auth.routes.js";
+import { bankRouter } from "./routes/bank.routes.js";
 import { kycRouter } from "./routes/kyc.routes.js";
 
 const app = express();
@@ -27,7 +28,8 @@ app.get("/health", async (_req, res) => {
 
 app.use("/api/kyc", kycRouter);
 app.use("/api/auth", authRouter);
+app.use("/api/bank", bankRouter);
 
 app.listen(env.PORT, env.HOST, () => {
-  console.log(`eKYC server listening on http://${env.HOST}:${env.PORT}`);
+  console.log(`eKYC & Bank server listening on http://${env.HOST}:${env.PORT}`);
 });

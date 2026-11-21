@@ -7,7 +7,7 @@ export const authRouter = Router();
 
 const registerSchema = z.object({
   kycSessionId: z.string().uuid(),
-  email: z.string().email().max(255),
+  email: z.string().trim().email().max(255),
   password: z.string().min(8).max(128),
 });
 
@@ -23,27 +23,27 @@ authRouter.post("/register", async (req, res) => {
   try {
     await client.query("BEGIN");
 
-    // Verify eKYC session exists and is APPROVED
     const kycRes = await client.query(
       `SELECT s.id, s.status, d.full_name, d.doc_number
        FROM kyc_sessions s
        JOIN kyc_documents d ON d.session_id = s.id
        WHERE s.id = $1
        ORDER BY d.created_at DESC
-       LIMIT 1`,
+       LIMIT 1
+       FOR UPDATE OF s`,
       [kycSessionId]
     );
 
     if (kycRes.rowCount === 0) {
       await client.query("ROLLBACK");
-      return res.status(403).json({ error: "Complete National ID/Passport eKYC before registering." });
+      return res.status(403).json({ error: "Complete National ID or Passport eKYC before registering." });
     }
 
     const kyc = kycRes.rows[0];
     if (kyc.status !== "APPROVED") {
       await client.query("ROLLBACK");
       return res.status(403).json({
-        error: `Account registration blocked: your eKYC status is ${kyc.status}.`,
+        error: `Registration denied: eKYC session status is ${kyc.status}.`,
       });
     }
 
@@ -64,13 +64,13 @@ authRouter.post("/register", async (req, res) => {
 
     await client.query("COMMIT");
     return res.status(201).json({
-      message: "Verified account created successfully",
+      message: "Verified user account created",
       user: userRes.rows[0],
     });
   } catch (err: any) {
     await client.query("ROLLBACK");
     if (err?.code === "23505") {
-      return res.status(409).json({ error: "Email or eKYC session already registered" });
+      return res.status(409).json({ error: "Email or eKYC session is already registered" });
     }
     console.error("Registration error:", err);
     return res.status(500).json({ error: "Failed to register account" });

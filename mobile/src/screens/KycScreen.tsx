@@ -54,7 +54,7 @@ export function KycScreen() {
   const [storageKey, setStorageKey] = useState<string>("");
   const [fullName, setFullName] = useState<string>("");
   const [docNumber, setDocNumber] = useState<string>("");
-  const [nationality, setNationality] = useState<string>("KHM");
+  const [nationality, setNationality] = useState<string>("");
   const [dateOfBirth, setDateOfBirth] = useState<string>("");
   const [expiryDate, setExpiryDate] = useState<string>("");
   const [ocrConfidence, setOcrConfidence] = useState<number>(0);
@@ -77,6 +77,28 @@ export function KycScreen() {
   const [busy, setBusy] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>("");
 
+  // Clears prior user/session/bank state so every new ID scan starts cleanly
+  const resetForNewScan = () => {
+    setSession(null);
+    setIdPhotoUri(null);
+    setStorageKey("");
+    setFullName("");
+    setDocNumber("");
+    setNationality("");
+    setDateOfBirth("");
+    setExpiryDate("");
+    setOcrConfidence(0);
+    setMrzValid(false);
+    setOcrIssues([]);
+    setNeutralSelfieUri(null);
+    setBiometrics(null);
+    setAuditLogs([]);
+    setEmail("");
+    setPassword("");
+    setRegisteredUser(null);
+    setBankAccount(null);
+  };
+
   const openCamera = async (mode: "ID_CAM" | "LIVENESS_CAM") => {
     if (busy) return;
     if (!permission?.granted) {
@@ -86,9 +108,13 @@ export function KycScreen() {
         return;
       }
     }
-    if (mode === "LIVENESS_CAM") {
+
+    if (mode === "ID_CAM") {
+      resetForNewScan();
+    } else {
       setNeutralSelfieUri(null);
     }
+
     setCaptureMode(mode);
   };
 
@@ -104,17 +130,13 @@ export function KycScreen() {
       });
       if (!rawPhoto?.uri) throw new Error("Camera returned no image URI");
 
-      // High enough resolution for crisp MRZ & ID numbers without huge file size
       const sharpUri = await prepareImage(rawPhoto.uri, 1400, 0.82);
       setIdPhotoUri(sharpUri);
       setCaptureMode("NONE");
 
-      let activeSession = session;
-      if (!activeSession) {
-        const created = await createKycSession(`user_${Date.now()}`);
-        activeSession = created.session;
-        setSession(activeSession);
-      }
+      const created = await createKycSession(`user_${Date.now()}`);
+      const activeSession = created.session;
+      setSession(activeSession);
 
       const res = await uploadIdForOcr(activeSession.id, docType, sharpUri);
       setStorageKey(res.storageKey);
@@ -126,6 +148,9 @@ export function KycScreen() {
       setOcrConfidence(res.extracted.ocrConfidence);
       setMrzValid(res.extracted.mrzCheckValid);
       setOcrIssues(res.extracted.validationIssues);
+
+      const details = await getKycSessionDetails(activeSession.id);
+      setAuditLogs(details.auditLogs);
 
       const issuesText =
         res.extracted.validationIssues.length > 0
@@ -319,7 +344,7 @@ export function KycScreen() {
 
         <TouchableOpacity style={styles.btnPrimary} onPress={() => openCamera("ID_CAM")} disabled={busy}>
           <Text style={styles.btnPrimaryText}>
-            {idPhotoUri ? "Re-Scan ID / Passport" : "Scan ID / Passport with Camera"}
+            {idPhotoUri ? "Scan New ID / Passport (Reset)" : "Scan ID / Passport with Camera"}
           </Text>
         </TouchableOpacity>
 
@@ -329,7 +354,7 @@ export function KycScreen() {
           <View style={{ marginTop: 8 }}>
             <Text style={styles.meta}>
               Dynamic OCR Confidence: {(ocrConfidence * 100).toFixed(1)}% | MRZ Check:{" "}
-              {mrzValid ? "PASSED" : "CHECK"} | Nat: {nationality}
+              {mrzValid ? "PASSED" : "CHECK"} | Nat: {nationality || "N/A"}
             </Text>
             {ocrIssues.map((issue, idx) => (
               <Text key={idx} style={styles.warnText}>
@@ -379,7 +404,7 @@ export function KycScreen() {
         )}
       </View>
 
-      {/* Step 3 & 4: Account Registration + Bank Account Opening */}
+      {/* Step 3: Account Registration + Bank Account Opening */}
       <View style={styles.card}>
         <Text style={styles.cardTitle}>3. Account & Bank Account Onboarding</Text>
         {!isApproved ? (
