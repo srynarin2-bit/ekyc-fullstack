@@ -1,3 +1,4 @@
+import * as FileSystem from "expo-file-system/legacy";
 import {
   AuditLogEntry,
   DocType,
@@ -42,26 +43,31 @@ export function createKycSession(userId: string): Promise<{ session: KycSession 
   });
 }
 
-export function uploadIdForOcr(
+export async function uploadIdForOcr(
   sessionId: string,
   docType: DocType,
   imageUri: string
 ): Promise<ExtractedOcrResponse> {
-  const formData = new FormData();
-  formData.append("docType", docType);
-  formData.append("idImage", {
-    uri: imageUri,
-    name: "id-document.jpg",
-    type: "image/jpeg",
-  } as any);
+  const result = await FileSystem.uploadAsync(
+    `${API_BASE_URL}/api/kyc/sessions/${sessionId}/ocr-scan`,
+    imageUri,
+    {
+      httpMethod: "POST",
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: "idImage",
+      mimeType: "image/jpeg",
+      parameters: { docType },
+    }
+  );
 
-  return fetchWithTimeout(`/api/kyc/sessions/${sessionId}/ocr-scan`, {
-    method: "POST",
-    body: formData,
-  });
+  const data = JSON.parse(result.body || "{}");
+  if (result.status < 200 || result.status >= 300) {
+    throw new Error(typeof data?.error === "string" ? data.error : `Upload failed (${result.status})`);
+  }
+  return data as ExtractedOcrResponse;
 }
 
-export function verifyLivenessAndSubmit(
+export async function verifyLivenessAndSubmit(
   sessionId: string,
   neutralUri: string,
   challengeUri: string,
@@ -78,29 +84,47 @@ export function verifyLivenessAndSubmit(
   session: KycSession;
   biometrics: { livenessPassed: boolean; livenessScore: number; faceMatchScore: number; notes: string };
 }> {
-  const formData = new FormData();
-  formData.append("neutralSelfie", {
-    uri: neutralUri,
-    name: "neutral-selfie.jpg",
-    type: "image/jpeg",
-  } as any);
-  formData.append("challengeSelfie", {
-    uri: challengeUri,
-    name: "challenge-selfie.jpg",
-    type: "image/jpeg",
-  } as any);
+  // Upload Frame 1 (neutral selfie) using native multipart upload
+  const neutralUpload = await FileSystem.uploadAsync(
+    `${API_BASE_URL}/api/kyc/sessions/${sessionId}/upload-selfie`,
+    neutralUri,
+    {
+      httpMethod: "POST",
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: "selfieImage",
+      mimeType: "image/jpeg",
+    }
+  );
+  const neutralData = JSON.parse(neutralUpload.body || "{}");
+  if (neutralUpload.status < 200 || neutralUpload.status >= 300) {
+    throw new Error(neutralData?.error || "Failed to upload neutral selfie");
+  }
 
-  formData.append("docType", metadata.docType);
-  formData.append("storageKey", metadata.storageKey);
-  formData.append("fullName", metadata.fullName);
-  formData.append("docNumber", metadata.docNumber);
-  formData.append("dateOfBirth", metadata.dateOfBirth);
-  formData.append("expiryDate", metadata.expiryDate);
-  formData.append("ocrConfidence", String(metadata.ocrConfidence));
+  // Upload Frame 2 (challenge selfie) using native multipart upload
+  const challengeUpload = await FileSystem.uploadAsync(
+    `${API_BASE_URL}/api/kyc/sessions/${sessionId}/upload-selfie`,
+    challengeUri,
+    {
+      httpMethod: "POST",
+      uploadType: FileSystem.FileSystemUploadType.MULTIPART,
+      fieldName: "selfieImage",
+      mimeType: "image/jpeg",
+    }
+  );
+  const challengeData = JSON.parse(challengeUpload.body || "{}");
+  if (challengeUpload.status < 200 || challengeUpload.status >= 300) {
+    throw new Error(challengeData?.error || "Failed to upload challenge selfie");
+  }
 
-  return fetchWithTimeout(`/api/kyc/sessions/${sessionId}/liveness-verify`, {
+  // Submit JSON paths + metadata to run liveness & save to PostgreSQL
+  return fetchWithTimeout(`/api/kyc/sessions/${sessionId}/liveness-verify-json`, {
     method: "POST",
-    body: formData,
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      ...metadata,
+      neutralStorageKey: neutralData.storageKey,
+      challengeStorageKey: challengeData.storageKey,
+    }),
   });
 }
 
