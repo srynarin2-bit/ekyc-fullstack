@@ -7,106 +7,95 @@ export interface LivenessAnalysisResult {
   notes: string;
 }
 
-async function getGridGray(filePath: string, width = 64, height = 64): Promise<Float32Array> {
-  const raw = await sharp(filePath)
+async function getGrayGrid(filePath: string, w = 64, h = 64): Promise<Uint8Array> {
+  const buf = await sharp(filePath)
     .rotate()
-    .resize(width, height, { fit: "cover" })
+    .resize(w, h, { fit: "cover" })
     .grayscale()
     .raw()
     .toBuffer();
-
-  const out = new Float32Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw[i];
-  return out;
+  return new Uint8Array(buf);
 }
 
-async function getIdPortraitPatch(idDocPath: string): Promise<Float32Array> {
-  const meta = await sharp(idDocPath).rotate().metadata();
-  const w = meta.width ?? 1000;
-  const h = meta.height ?? 600;
+async function getFacePatch(
+  imagePath: string,
+  box: { left: number; top: number; width: number; height: number }
+): Promise<{ gray: Float32Array; hist: Float32Array }> {
+  const meta = await sharp(imagePath).rotate().metadata();
+  const imgW = meta.width ?? 1000;
+  const imgH = meta.height ?? 800;
 
-  // On standard ID cards, the holder portrait sits on the left/upper-left side
-  const cropLeft = Math.max(0, Math.floor(w * 0.04));
-  const cropTop = Math.max(0, Math.floor(h * 0.16));
-  const cropWidth = Math.max(64, Math.floor(w * 0.34));
-  const cropHeight = Math.max(64, Math.floor(h * 0.58));
+  const left = Math.max(0, Math.min(Math.floor(imgW * box.left), imgW - 40));
+  const top = Math.max(0, Math.min(Math.floor(imgH * box.top), imgH - 40));
+  const width = Math.max(40, Math.min(Math.floor(imgW * box.width), imgW - left));
+  const height = Math.max(40, Math.min(Math.floor(imgH * box.height), imgH - top));
 
-  const raw = await sharp(idDocPath)
+  const base = sharp(imagePath)
     .rotate()
-    .extract({
-      left: Math.min(cropLeft, Math.max(0, w - 64)),
-      top: Math.min(cropTop, Math.max(0, h - 64)),
-      width: Math.min(cropWidth, w),
-      height: Math.min(cropHeight, h),
-    })
-    .resize(48, 48, { fit: "fill" })
-    .grayscale()
-    .normalize()
-    .raw()
-    .toBuffer();
+    .extract({ left, top, width, height })
+    .resize(48, 48, { fit: "fill" });
 
-  const out = new Float32Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw[i];
-  return out;
+  const [grayRaw, rgbRaw] = await Promise.all([
+    base.clone().grayscale().normalize().raw().toBuffer(),
+    base.clone().removeAlpha().raw().toBuffer(),
+  ]);
+
+  const gray = new Float32Array(grayRaw.length);
+  for (let i = 0; i < grayRaw.length; i++) gray[i] = grayRaw[i];
+
+  const bins = 8;
+  const hist = new Float32Array(bins * 3);
+  const totalPixels = rgbRaw.length / 3;
+  for (let i = 0; i < rgbRaw.length; i += 3) {
+    const r = Math.min(bins - 1, Math.floor((rgbRaw[i] / 256) * bins));
+    const g = Math.min(bins - 1, Math.floor((rgbRaw[i + 1] / 256) * bins));
+    const b = Math.min(bins - 1, Math.floor((rgbRaw[i + 2] / 256) * bins));
+    hist[r] += 1 / totalPixels;
+    hist[bins + g] += 1 / totalPixels;
+    hist[bins * 2 + b] += 1 / totalPixels;
+  }
+
+  return { gray, hist };
 }
 
-async function getSelfieCenterPatch(selfiePath: string): Promise<Float32Array> {
-  const meta = await sharp(selfiePath).rotate().metadata();
-  const w = meta.width ?? 720;
-  const h = meta.height ?? 960;
-
-  const cropLeft = Math.max(0, Math.floor(w * 0.2));
-  const cropTop = Math.max(0, Math.floor(h * 0.18));
-  const cropWidth = Math.max(64, Math.floor(w * 0.6));
-  const cropHeight = Math.max(64, Math.floor(h * 0.55));
-
-  const raw = await sharp(selfiePath)
-    .rotate()
-    .extract({
-      left: Math.min(cropLeft, Math.max(0, w - 64)),
-      top: Math.min(cropTop, Math.max(0, h - 64)),
-      width: Math.min(cropWidth, w),
-      height: Math.min(cropHeight, h),
-    })
-    .resize(48, 48, { fit: "fill" })
-    .grayscale()
-    .normalize()
-    .raw()
-    .toBuffer();
-
-  const out = new Float32Array(raw.length);
-  for (let i = 0; i < raw.length; i++) out[i] = raw[i];
-  return out;
+function cosineSim(a: Float32Array, b: Float32Array): number {
+  let dot = 0;
+  let na = 0;
+  let nb = 0;
+  const n = Math.min(a.length, b.length);
+  for (let i = 0; i < n; i++) {
+    dot += a[i] * b[i];
+    na += a[i] * a[i];
+    nb += b[i] * b[i];
+  }
+  if (na === 0 || nb === 0) return 0;
+  return Math.max(0, Math.min(1, dot / (Math.sqrt(na) * Math.sqrt(nb))));
 }
 
-function normalizedCorrelation(a: Float32Array, b: Float32Array): number {
+function znccSim(a: Float32Array, b: Float32Array): number {
   const n = Math.min(a.length, b.length);
   if (n === 0) return 0;
-
-  let meanA = 0;
-  let meanB = 0;
+  let ma = 0;
+  let mb = 0;
   for (let i = 0; i < n; i++) {
-    meanA += a[i];
-    meanB += b[i];
+    ma += a[i];
+    mb += b[i];
   }
-  meanA /= n;
-  meanB /= n;
-
+  ma /= n;
+  mb /= n;
   let num = 0;
-  let denA = 0;
-  let denB = 0;
+  let da2 = 0;
+  let db2 = 0;
   for (let i = 0; i < n; i++) {
-    const da = a[i] - meanA;
-    const db = b[i] - meanB;
+    const da = a[i] - ma;
+    const db = b[i] - mb;
     num += da * db;
-    denA += da * da;
-    denB += db * db;
+    da2 += da * da;
+    db2 += db * db;
   }
-
-  const denom = Math.sqrt(denA * denB);
-  if (denom === 0) return 0.5;
-  const corr = num / denom; // -1..1
-  return Math.min(Math.max((corr + 1) / 2, 0), 1);
+  const den = Math.sqrt(da2 * db2);
+  if (den === 0) return 0;
+  return Math.max(0, Math.min(1, (num / den + 1) / 2));
 }
 
 export async function analyzeLivenessAndSelfie(
@@ -114,44 +103,43 @@ export async function analyzeLivenessAndSelfie(
   challengeSelfiePath: string,
   idDocPath: string
 ): Promise<LivenessAnalysisResult> {
-  const [neutralGrid, challengeGrid, idFace, selfieFace] = await Promise.all([
-    getGridGray(neutralSelfiePath),
-    getGridGray(challengeSelfiePath),
-    getIdPortraitPatch(idDocPath),
-    getSelfieCenterPatch(neutralSelfiePath),
+  const [neutralGrid, challengeGrid, idPatch, selfiePatch] = await Promise.all([
+    getGrayGrid(neutralSelfiePath),
+    getGrayGrid(challengeSelfiePath),
+    getFacePatch(idDocPath, { left: 0.04, top: 0.16, width: 0.34, height: 0.58 }),
+    getFacePatch(neutralSelfiePath, { left: 0.22, top: 0.18, width: 0.56, height: 0.55 }),
   ]);
 
   let diffSum = 0;
-  let brightnessSum = 0;
+  let brightSum = 0;
   for (let i = 0; i < neutralGrid.length; i++) {
     diffSum += Math.abs(neutralGrid[i] - challengeGrid[i]);
-    brightnessSum += challengeGrid[i];
+    brightSum += challengeGrid[i];
   }
 
   const meanMotion = diffSum / neutralGrid.length;
-  const meanBrightness = brightnessSum / challengeGrid.length;
+  const meanBrightness = brightSum / challengeGrid.length;
 
-  const wellLit = meanBrightness >= 30 && meanBrightness <= 240;
-  const hasRealMotion = meanMotion >= 2.0 && meanMotion <= 110;
-  const livenessPassed = wellLit && hasRealMotion;
+  // Strict liveness: must have real movement between frames (blocks identical static images)
+  // and proper exposure (blocks pitch-black or blown-out frames)
+  const validLighting = meanBrightness >= 35 && meanBrightness <= 235;
+  const validMotion = meanMotion >= 3.5 && meanMotion <= 105;
+  const livenessPassed = validLighting && validMotion;
 
   const livenessScore = livenessPassed
-    ? Number(Math.min(0.85 + Math.min(meanMotion, 30) / 220, 0.98).toFixed(4))
-    : 0.3;
+    ? Number(Math.min(0.83 + Math.min(meanMotion, 25) / 170, 0.98).toFixed(4))
+    : Number(Math.max(0.1, Math.min(0.45, meanMotion / 12)).toFixed(4));
 
-  // Map correlation to a calibrated similarity score; note that pixel correlation on unaligned
-  // cameras is noisy, so we floor real-user matches cleanly when liveness passes
-  const rawSim = normalizedCorrelation(idFace, selfieFace);
-  const faceMatchScore = livenessPassed
-    ? Number(Math.min(Math.max(0.86 + rawSim * 0.1, 0.86), 0.96).toFixed(4))
-    : 0.35;
+  const colorSimilarity = cosineSim(idPatch.hist, selfiePatch.hist);
+  const structureSimilarity = znccSim(idPatch.gray, selfiePatch.gray);
+  const rawMatch = colorSimilarity * 0.65 + structureSimilarity * 0.35;
+
+  const faceMatchScore = Number(Math.min(Math.max(0.2 + rawMatch * 0.76, 0.15), 0.96).toFixed(4));
 
   return {
     livenessPassed,
     livenessScore,
     faceMatchScore,
-    notes: livenessPassed
-      ? `Liveness & ID face check passed (motion=${meanMotion.toFixed(1)}, sim=${rawSim.toFixed(2)})`
-      : `Check failed (brightness=${meanBrightness.toFixed(1)}, motion=${meanMotion.toFixed(1)})`,
+    notes: `motion=${meanMotion.toFixed(1)}, brightness=${meanBrightness.toFixed(1)}, color=${colorSimilarity.toFixed(2)}, struct=${structureSimilarity.toFixed(2)}`,
   };
 }

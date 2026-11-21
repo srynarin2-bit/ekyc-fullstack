@@ -1,5 +1,6 @@
 export type DocType = "NATIONAL_ID" | "PASSPORT" | "DRIVER_LICENSE";
 export type KycStatus = "PENDING" | "APPROVED" | "REJECTED" | "MANUAL_REVIEW";
+export type BankCurrency = "USD" | "KHR";
 
 export interface KycSession {
   id: string;
@@ -17,10 +18,21 @@ export interface ExtractedOcrResponse {
     rawText: string;
     fullName: string;
     docNumber: string;
+    nationality: string;
     dateOfBirth: string;
     expiryDate: string;
+    mrzCheckValid: boolean;
     ocrConfidence: number;
+    isValidData: boolean;
+    validationIssues: string[];
   };
+}
+
+export interface BiometricsResult {
+  livenessPassed: boolean;
+  livenessScore: number;
+  faceMatchScore: number;
+  notes: string;
 }
 
 export interface AuditLogEntry {
@@ -38,5 +50,16 @@ export interface RegisteredUser {
   email: string;
   full_name: string;
   doc_number: string;
+  created_at: string;
+}
+
+export interface OpenedBankAccount {
+  id: string;
+  user_id: string;
+  kyc_session_id: string;
+  account_number: string;
+  currency: BankCurrency;
+  balance: string;
+  status: string;
   created_at: string;
 }

@@ -51,6 +51,19 @@ CREATE TABLE IF NOT EXISTS users (
   created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
 
+CREATE TABLE IF NOT EXISTS bank_accounts (
+  id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  kyc_session_id UUID UNIQUE NOT NULL REFERENCES kyc_sessions(id),
+  account_number VARCHAR(32) UNIQUE NOT NULL,
+  currency VARCHAR(3) NOT NULL DEFAULT 'USD', -- USD | KHR
+  balance NUMERIC(14, 2) NOT NULL DEFAULT 0.00,
+  status VARCHAR(24) NOT NULL DEFAULT 'ACTIVE',
+  created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_bank_accounts_user_id ON bank_accounts(user_id);
+
 CREATE INDEX IF NOT EXISTS idx_kyc_sessions_user_id ON kyc_sessions(user_id);
 CREATE INDEX IF NOT EXISTS idx_kyc_documents_session_id ON kyc_documents(session_id);
 CREATE INDEX IF NOT EXISTS idx_kyc_biometrics_session_id ON kyc_biometric_checks(session_id);

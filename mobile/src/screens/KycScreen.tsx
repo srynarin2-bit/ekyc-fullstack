@@ -16,152 +16,190 @@ import {
   API_BASE_URL,
   createKycSession,
   getKycSessionDetails,
+  openBankAccount,
   registerVerifiedAccount,
   uploadIdForOcr,
   verifyLivenessAndSubmit,
 } from "../services/kycApi";
-import { AuditLogEntry, DocType, KycSession, RegisteredUser } from "../types/kyc";
+import {
+  AuditLogEntry,
+  BankCurrency,
+  BiometricsResult,
+  DocType,
+  KycSession,
+  OpenedBankAccount,
+  RegisteredUser,
+} from "../types/kyc";
 
 const DOC_TYPES: DocType[] = ["NATIONAL_ID", "PASSPORT", "DRIVER_LICENSE"];
+const CURRENCIES: BankCurrency[] = ["USD", "KHR"];
 
-async function compressPhoto(uri: string, targetWidth = 1000): Promise<string> {
-  const result = await ImageManipulator.manipulateAsync(
+async function prepareImage(uri: string, width: number, compress: number): Promise<string> {
+  const manipulated = await ImageManipulator.manipulateAsync(
     uri,
-    [{ resize: { width: targetWidth } }],
-    { compress: 0.72, format: ImageManipulator.SaveFormat.JPEG }
+    [{ resize: { width } }],
+    { compress, format: ImageManipulator.SaveFormat.JPEG }
   );
-  return result.uri;
+  return manipulated.uri;
 }
 
 export function KycScreen() {
   const [permission, requestPermission] = useCameraPermissions();
   const cameraRef = useRef<CameraView | null>(null);
 
-  // Step 1: Document Capture & OCR
+  // Document & OCR state
   const [docType, setDocType] = useState<DocType>("NATIONAL_ID");
   const [session, setSession] = useState<KycSession | null>(null);
   const [idPhotoUri, setIdPhotoUri] = useState<string | null>(null);
   const [storageKey, setStorageKey] = useState<string>("");
-  const [fullName, setFullName] = useState("");
-  const [docNumber, setDocNumber] = useState("");
-  const [dateOfBirth, setDateOfBirth] = useState("1996-05-18");
-  const [expiryDate, setExpiryDate] = useState("2031-12-31");
+  const [fullName, setFullName] = useState<string>("");
+  const [docNumber, setDocNumber] = useState<string>("");
+  const [nationality, setNationality] = useState<string>("KHM");
+  const [dateOfBirth, setDateOfBirth] = useState<string>("");
+  const [expiryDate, setExpiryDate] = useState<string>("");
   const [ocrConfidence, setOcrConfidence] = useState<number>(0);
+  const [mrzValid, setMrzValid] = useState<boolean>(false);
+  const [ocrIssues, setOcrIssues] = useState<string[]>([]);
 
-  // Step 2: 2-Frame Active Liveness Capture
+  // Liveness camera state
   const [captureMode, setCaptureMode] = useState<"NONE" | "ID_CAM" | "LIVENESS_CAM">("NONE");
   const [neutralSelfieUri, setNeutralSelfieUri] = useState<string | null>(null);
-  const [challengeSelfieUri, setChallengeSelfieUri] = useState<string | null>(null);
-  const [livenessNotes, setLivenessNotes] = useState<string>("");
+  const [biometrics, setBiometrics] = useState<BiometricsResult | null>(null);
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
 
-  // Step 3: Account Registration (Unlocked only when session.status === 'APPROVED')
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
+  // Account & Bank onboarding state
+  const [email, setEmail] = useState<string>("");
+  const [password, setPassword] = useState<string>("");
   const [registeredUser, setRegisteredUser] = useState<RegisteredUser | null>(null);
-  const [loading, setLoading] = useState(false);
+  const [currency, setCurrency] = useState<BankCurrency>("USD");
+  const [bankAccount, setBankAccount] = useState<OpenedBankAccount | null>(null);
+
+  const [busy, setBusy] = useState<boolean>(false);
+  const [statusMessage, setStatusMessage] = useState<string>("");
 
   const openCamera = async (mode: "ID_CAM" | "LIVENESS_CAM") => {
+    if (busy) return;
     if (!permission?.granted) {
-      const res = await requestPermission();
-      if (!res.granted) {
-        Alert.alert("Permission Required", "Camera permission is required to scan your ID and selfie.");
+      const granted = await requestPermission();
+      if (!granted.granted) {
+        Alert.alert("Camera Required", "Allow camera permission in Android settings to scan ID and face.");
         return;
       }
+    }
+    if (mode === "LIVENESS_CAM") {
+      setNeutralSelfieUri(null);
     }
     setCaptureMode(mode);
   };
 
-  const handleCaptureIdAndOcr = async () => {
-    if (!cameraRef.current) return;
-    setLoading(true);
-    try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
-      if (!photo?.uri) throw new Error("Failed to capture ID photo");
+  const handleCaptureId = async () => {
+    if (!cameraRef.current || busy) return;
+    setBusy(true);
+    setStatusMessage("Capturing ID photo & running OCR...");
 
-      const compressedUri = await compressPhoto(photo.uri, 1100);
-      setIdPhotoUri(compressedUri);
+    try {
+      const rawPhoto = await cameraRef.current.takePictureAsync({
+        quality: 0.85,
+        skipProcessing: false,
+      });
+      if (!rawPhoto?.uri) throw new Error("Camera returned no image URI");
+
+      // High enough resolution for crisp MRZ & ID numbers without huge file size
+      const sharpUri = await prepareImage(rawPhoto.uri, 1400, 0.82);
+      setIdPhotoUri(sharpUri);
       setCaptureMode("NONE");
 
-      // Create session if not started yet
       let activeSession = session;
       if (!activeSession) {
-        const created = await createKycSession(`applicant_${Date.now()}`);
+        const created = await createKycSession(`user_${Date.now()}`);
         activeSession = created.session;
         setSession(activeSession);
       }
 
-      // Send compressed ID photo to backend Tesseract OCR
-      const ocrRes = await uploadIdForOcr(activeSession.id, docType, compressedUri);
-      setStorageKey(ocrRes.storageKey);
-      setFullName(ocrRes.extracted.fullName);
-      setDocNumber(ocrRes.extracted.docNumber);
-      setDateOfBirth(ocrRes.extracted.dateOfBirth);
-      setExpiryDate(ocrRes.extracted.expiryDate);
-      setOcrConfidence(ocrRes.extracted.ocrConfidence);
+      const res = await uploadIdForOcr(activeSession.id, docType, sharpUri);
+      setStorageKey(res.storageKey);
+      setFullName(res.extracted.fullName);
+      setDocNumber(res.extracted.docNumber);
+      setNationality(res.extracted.nationality);
+      setDateOfBirth(res.extracted.dateOfBirth);
+      setExpiryDate(res.extracted.expiryDate);
+      setOcrConfidence(res.extracted.ocrConfidence);
+      setMrzValid(res.extracted.mrzCheckValid);
+      setOcrIssues(res.extracted.validationIssues);
+
+      const issuesText =
+        res.extracted.validationIssues.length > 0
+          ? `\nWarnings: ${res.extracted.validationIssues.join(", ")}`
+          : "";
 
       Alert.alert(
-        "OCR Extraction Complete",
-        `Name: ${ocrRes.extracted.fullName}\nID #: ${ocrRes.extracted.docNumber}\nConfidence: ${(
-          ocrRes.extracted.ocrConfidence * 100
-        ).toFixed(0)}%`
+        "OCR Scan Finished",
+        `Name: ${res.extracted.fullName}\nID #: ${res.extracted.docNumber}\nConfidence: ${(
+          res.extracted.ocrConfidence * 100
+        ).toFixed(1)}%${issuesText}`
       );
     } catch (err) {
-      Alert.alert("ID Scan Error", err instanceof Error ? err.message : "OCR failed");
+      setCaptureMode("NONE");
+      Alert.alert("ID Scan Error", err instanceof Error ? err.message : "Failed to scan ID");
     } finally {
-      setLoading(false);
+      setBusy(false);
+      setStatusMessage("");
     }
   };
 
-  const handleCaptureLivenessFrame = async () => {
-    if (!cameraRef.current || !session) return;
-    setLoading(true);
-    try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.75 });
-      if (!photo?.uri) throw new Error("Failed to capture selfie");
+  const handleCaptureSelfieFrame = async () => {
+    if (!cameraRef.current || !session || busy) return;
+    setBusy(true);
 
-      const compressedUri = await compressPhoto(photo.uri, 720);
+    try {
+      const rawSelfie = await cameraRef.current.takePictureAsync({
+        quality: 0.78,
+        skipProcessing: false,
+      });
+      if (!rawSelfie?.uri) throw new Error("Camera returned no selfie URI");
+
+      const compressedSelfie = await prepareImage(rawSelfie.uri, 720, 0.72);
 
       if (!neutralSelfieUri) {
-        setNeutralSelfieUri(compressedUri);
+        setNeutralSelfieUri(compressedSelfie);
         Alert.alert(
-          "Step 1 of 2 Captured",
-          "Now turn your head slightly to the right and smile, then tap Capture Challenge Pose."
+          "Pose 1/2 Saved",
+          "Now turn your head slightly to the right or smile, then tap Capture Challenge Pose."
         );
       } else {
-        setChallengeSelfieUri(compressedUri);
         setCaptureMode("NONE");
+        setStatusMessage("Verifying 2-frame liveness & portrait match...");
 
-        const result = await verifyLivenessAndSubmit(session.id, neutralSelfieUri, compressedUri, {
+        const result = await verifyLivenessAndSubmit(session.id, neutralSelfieUri, compressedSelfie, {
           docType,
           storageKey,
           fullName: fullName.trim(),
           docNumber: docNumber.trim(),
           dateOfBirth: dateOfBirth.trim(),
           expiryDate: expiryDate.trim(),
-          ocrConfidence: ocrConfidence || 0.9,
+          ocrConfidence,
         });
 
         setSession(result.session);
-        setLivenessNotes(result.biometrics.notes);
+        setBiometrics(result.biometrics);
 
         const details = await getKycSessionDetails(session.id);
         setAuditLogs(details.auditLogs);
       }
     } catch (err) {
-      Alert.alert("Liveness Error", err instanceof Error ? err.message : "Liveness check failed");
+      setCaptureMode("NONE");
+      Alert.alert("Liveness Error", err instanceof Error ? err.message : "Liveness verification failed");
     } finally {
-      setLoading(false);
+      setBusy(false);
+      setStatusMessage("");
     }
   };
 
-  const handleRegisterAccount = async () => {
-    if (!session || session.status !== "APPROVED") {
-      Alert.alert("eKYC Required", "Your National ID/Passport and liveness check must be APPROVED first.");
-      return;
-    }
+  const handleRegister = async () => {
+    if (!session || session.status !== "APPROVED" || busy) return;
+    setBusy(true);
+    setStatusMessage("Registering verified user...");
 
-    setLoading(true);
     try {
       const res = await registerVerifiedAccount({
         kycSessionId: session.id,
@@ -171,50 +209,76 @@ export function KycScreen() {
       setRegisteredUser(res.user);
       const details = await getKycSessionDetails(session.id);
       setAuditLogs(details.auditLogs);
-      Alert.alert("Registration Complete", `Welcome ${res.user.full_name}! Account stored in PostgreSQL.`);
+      Alert.alert("Account Created", `Verified user ${res.user.full_name} saved in PostgreSQL.`);
     } catch (err) {
-      Alert.alert("Registration Blocked", err instanceof Error ? err.message : "Registration failed");
+      Alert.alert("Registration Failed", err instanceof Error ? err.message : "Unable to register");
     } finally {
-      setLoading(false);
+      setBusy(false);
+      setStatusMessage("");
+    }
+  };
+
+  const handleOpenBankAccount = async () => {
+    if (!session || !registeredUser || busy) return;
+    setBusy(true);
+    setStatusMessage("Opening bank account...");
+
+    try {
+      const res = await openBankAccount({
+        userId: registeredUser.id,
+        kycSessionId: session.id,
+        currency,
+      });
+      setBankAccount(res.account);
+      const details = await getKycSessionDetails(session.id);
+      setAuditLogs(details.auditLogs);
+      Alert.alert("Bank Account Opened", `Account #: ${res.account.account_number} (${res.account.currency})`);
+    } catch (err) {
+      Alert.alert("Bank Account Error", err instanceof Error ? err.message : "Could not open account");
+    } finally {
+      setBusy(false);
+      setStatusMessage("");
     }
   };
 
   if (captureMode !== "NONE") {
     const isIdCam = captureMode === "ID_CAM";
     return (
-      <View style={styles.cameraContainer}>
+      <View style={styles.cameraRoot}>
         <CameraView ref={cameraRef} style={styles.camera} facing={isIdCam ? "back" : "front"} />
-        <View style={styles.overlayBox}>
-          <Text style={styles.overlayTitle}>
+        <View style={styles.cameraOverlay}>
+          <Text style={styles.guideBanner}>
             {isIdCam
-              ? `Align your ${docType} clearly inside the frame`
+              ? `Keep entire ${docType} & bottom MRZ sharp inside frame`
               : !neutralSelfieUri
-              ? "Liveness 1/2: Look straight at the camera"
-              : "Liveness 2/2: Turn head slightly right & smile"}
+              ? "Liveness 1/2: Face forward in good light"
+              : "Liveness 2/2: Move/turn head slightly & smile"}
           </Text>
-          <View style={isIdCam ? styles.idFrameGuide : styles.faceOvalGuide} />
-          <View style={styles.camActions}>
+
+          <View style={isIdCam ? styles.idBox : styles.faceOval} />
+
+          <View style={styles.camButtonRow}>
             <TouchableOpacity
-              style={styles.cancelBtn}
+              style={styles.camCancel}
               onPress={() => setCaptureMode("NONE")}
-              disabled={loading}
+              disabled={busy}
             >
-              <Text style={styles.cancelBtnText}>Cancel</Text>
+              <Text style={styles.camBtnText}>Cancel</Text>
             </TouchableOpacity>
             <TouchableOpacity
-              style={styles.captureBtn}
-              onPress={isIdCam ? handleCaptureIdAndOcr : handleCaptureLivenessFrame}
-              disabled={loading}
+              style={styles.camSnap}
+              onPress={isIdCam ? handleCaptureId : handleCaptureSelfieFrame}
+              disabled={busy}
             >
-              {loading ? (
+              {busy ? (
                 <ActivityIndicator color="#fff" />
               ) : (
-                <Text style={styles.captureBtnText}>
+                <Text style={styles.camBtnText}>
                   {isIdCam
-                    ? "Snap ID & Run OCR"
+                    ? "Snap ID & Scan OCR"
                     : !neutralSelfieUri
                     ? "Capture Neutral Face"
-                    : "Capture Challenge & Verify"}
+                    : "Capture Challenge Pose"}
                 </Text>
               )}
             </TouchableOpacity>
@@ -224,40 +288,59 @@ export function KycScreen() {
     );
   }
 
+  const isApproved = session?.status === "APPROVED";
+
   return (
     <ScrollView contentContainerStyle={styles.container}>
-      <Text style={styles.title}>Real Camera eKYC & Account Gate</Text>
-      <Text style={styles.apiBanner}>Backend: {API_BASE_URL}</Text>
+      <Text style={styles.title}>eKYC & Bank Onboarding</Text>
+      <Text style={styles.subText}>API: {API_BASE_URL}</Text>
+      {statusMessage !== "" && (
+        <View style={styles.progressBox}>
+          <ActivityIndicator size="small" color="#1d4ed8" />
+          <Text style={styles.progressText}>{statusMessage}</Text>
+        </View>
+      )}
 
-      {/* STAGE 1: Document Selection + Camera OCR */}
+      {/* Step 1: ID / Passport Scan */}
       <View style={styles.card}>
-        <Text style={styles.stepTitle}>Step 1: Scan National ID or Passport (OCR)</Text>
+        <Text style={styles.cardTitle}>1. National ID / Passport OCR Scan</Text>
         <View style={styles.row}>
-          {DOC_TYPES.map((item) => (
+          {DOC_TYPES.map((t) => (
             <TouchableOpacity
-              key={item}
-              style={[styles.chip, docType === item && styles.chipActive]}
-              onPress={() => setDocType(item)}
+              key={t}
+              style={[styles.chip, docType === t && styles.chipActive]}
+              onPress={() => setDocType(t)}
+              disabled={busy}
             >
-              <Text style={[styles.chipText, docType === item && styles.chipTextActive]}>{item}</Text>
+              <Text style={[styles.chipText, docType === t && styles.chipTextActive]}>{t}</Text>
             </TouchableOpacity>
           ))}
         </View>
 
-        <TouchableOpacity style={styles.primaryBtn} onPress={() => openCamera("ID_CAM")} disabled={loading}>
-          <Text style={styles.primaryBtnText}>
-            {idPhotoUri ? "Re-Scan ID / Passport with Camera" : "Open Camera to Scan ID / Passport"}
+        <TouchableOpacity style={styles.btnPrimary} onPress={() => openCamera("ID_CAM")} disabled={busy}>
+          <Text style={styles.btnPrimaryText}>
+            {idPhotoUri ? "Re-Scan ID / Passport" : "Scan ID / Passport with Camera"}
           </Text>
         </TouchableOpacity>
 
-        {idPhotoUri && <Image source={{ uri: idPhotoUri }} style={styles.previewImg} />}
+        {idPhotoUri && <Image source={{ uri: idPhotoUri }} style={styles.preview} />}
 
         {storageKey !== "" && (
-          <>
-            <Text style={styles.label}>Extracted Full Name (Verify/Edit)</Text>
+          <View style={{ marginTop: 8 }}>
+            <Text style={styles.meta}>
+              Dynamic OCR Confidence: {(ocrConfidence * 100).toFixed(1)}% | MRZ Check:{" "}
+              {mrzValid ? "PASSED" : "CHECK"} | Nat: {nationality}
+            </Text>
+            {ocrIssues.map((issue, idx) => (
+              <Text key={idx} style={styles.warnText}>
+                ! {issue}
+              </Text>
+            ))}
+
+            <Text style={styles.label}>Full Name</Text>
             <TextInput style={styles.input} value={fullName} onChangeText={setFullName} />
 
-            <Text style={styles.label}>Extracted Document Number</Text>
+            <Text style={styles.label}>Document Number</Text>
             <TextInput style={styles.input} value={docNumber} onChangeText={setDocNumber} />
 
             <Text style={styles.label}>Date of Birth (YYYY-MM-DD)</Text>
@@ -265,68 +348,56 @@ export function KycScreen() {
 
             <Text style={styles.label}>Expiry Date (YYYY-MM-DD)</Text>
             <TextInput style={styles.input} value={expiryDate} onChangeText={setExpiryDate} />
-
-            <Text style={styles.meta}>OCR Confidence: {(ocrConfidence * 100).toFixed(1)}%</Text>
-          </>
+          </View>
         )}
       </View>
 
-      {/* STAGE 2: Live Face Liveness Challenge */}
+      {/* Step 2: Face Liveness Verification */}
       <View style={styles.card}>
-        <Text style={styles.stepTitle}>Step 2: Real-Time Face Liveness Check</Text>
-        <Text style={styles.meta}>
-          Captures 2 sequential front-camera poses (neutral + head turn) and validates liveness in PostgreSQL.
-        </Text>
-
+        <Text style={styles.cardTitle}>2. Live Face Liveness & ID Match</Text>
         <TouchableOpacity
-          style={[styles.primaryBtn, !storageKey && styles.disabledBtn]}
-          disabled={!storageKey || loading}
-          onPress={() => {
-            setNeutralSelfieUri(null);
-            setChallengeSelfieUri(null);
-            openCamera("LIVENESS_CAM");
-          }}
+          style={[styles.btnPrimary, (!storageKey || busy) && styles.btnDisabled]}
+          disabled={!storageKey || busy}
+          onPress={() => openCamera("LIVENESS_CAM")}
         >
-          <Text style={styles.primaryBtnText}>Start Live Face Liveness Camera</Text>
+          <Text style={styles.btnPrimaryText}>Start 2-Pose Liveness Check</Text>
         </TouchableOpacity>
 
         {session && (
-          <View style={styles.resultBox}>
-            <Text style={styles.statusText}>eKYC Status: {session.status}</Text>
-            <Text style={styles.meta}>Session ID: {session.id}</Text>
-            <Text style={styles.meta}>Risk Score: {session.risk_score ?? "Pending"}</Text>
-            {livenessNotes !== "" && <Text style={styles.meta}>{livenessNotes}</Text>}
+          <View style={styles.infoBox}>
+            <Text style={styles.statusHighlight}>Status: {session.status}</Text>
+            <Text style={styles.meta}>Session: {session.id}</Text>
+            <Text style={styles.meta}>Risk Score: {session.risk_score ?? "N/A"}</Text>
+            <Text style={styles.meta}>Reason: {session.decision_reason ?? "Pending"}</Text>
+            {biometrics && (
+              <Text style={styles.meta}>
+                Liveness: {(biometrics.livenessScore * 100).toFixed(1)}% | Match:{" "}
+                {(biometrics.faceMatchScore * 100).toFixed(1)}% ({biometrics.notes})
+              </Text>
+            )}
           </View>
         )}
       </View>
 
-      {/* STAGE 3: Gated Account Registration */}
+      {/* Step 3 & 4: Account Registration + Bank Account Opening */}
       <View style={styles.card}>
-        <Text style={styles.stepTitle}>Step 3: Create System Account (Unlocked After Approval)</Text>
-        {session?.status !== "APPROVED" ? (
-          <Text style={styles.lockedText}>
-            Account registration is locked until your National ID/Passport and Face Liveness are APPROVED.
+        <Text style={styles.cardTitle}>3. Account & Bank Account Onboarding</Text>
+        {!isApproved ? (
+          <Text style={styles.warnText}>
+            Blocked until eKYC status is APPROVED. Mismatched faces, low match scores, or invalid IDs cannot open an account.
           </Text>
-        ) : registeredUser ? (
-          <View style={styles.resultBox}>
-            <Text style={styles.statusText}>Account Registered!</Text>
-            <Text style={styles.meta}>User DB ID: {registeredUser.id}</Text>
-            <Text style={styles.meta}>Email: {registeredUser.email}</Text>
-            <Text style={styles.meta}>Verified Name: {registeredUser.full_name}</Text>
-            <Text style={styles.meta}>Verified ID #: {registeredUser.doc_number}</Text>
-          </View>
-        ) : (
+        ) : !registeredUser ? (
           <>
-            <Text style={styles.label}>Email Address</Text>
+            <Text style={styles.label}>Email</Text>
             <TextInput
               style={styles.input}
               value={email}
               onChangeText={setEmail}
               autoCapitalize="none"
               keyboardType="email-address"
-              placeholder="you@example.com"
+              placeholder="name@example.com"
             />
-            <Text style={styles.label}>Password (min 8 chars)</Text>
+            <Text style={styles.label}>Password (8+ chars)</Text>
             <TextInput
               style={styles.input}
               value={password}
@@ -334,21 +405,50 @@ export function KycScreen() {
               secureTextEntry
               placeholder="********"
             />
-            <TouchableOpacity style={styles.primaryBtn} onPress={handleRegisterAccount} disabled={loading}>
-              {loading ? (
-                <ActivityIndicator color="#fff" />
-              ) : (
-                <Text style={styles.primaryBtnText}>Register Verified Account</Text>
-              )}
+            <TouchableOpacity style={styles.btnPrimary} onPress={handleRegister} disabled={busy}>
+              <Text style={styles.btnPrimaryText}>Register Verified User</Text>
             </TouchableOpacity>
           </>
+        ) : (
+          <View style={styles.infoBox}>
+            <Text style={styles.statusHighlight}>Registered User: {registeredUser.full_name}</Text>
+            <Text style={styles.meta}>Email: {registeredUser.email}</Text>
+
+            <Text style={styles.label}>Select Bank Account Currency</Text>
+            <View style={styles.row}>
+              {CURRENCIES.map((c) => (
+                <TouchableOpacity
+                  key={c}
+                  style={[styles.chip, currency === c && styles.chipActive]}
+                  onPress={() => setCurrency(c)}
+                  disabled={busy}
+                >
+                  <Text style={[styles.chipText, currency === c && styles.chipTextActive]}>{c}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {!bankAccount ? (
+              <TouchableOpacity style={styles.btnPrimary} onPress={handleOpenBankAccount} disabled={busy}>
+                <Text style={styles.btnPrimaryText}>Open {currency} Bank Account</Text>
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.bankBox}>
+                <Text style={styles.statusHighlight}>Account Number: {bankAccount.account_number}</Text>
+                <Text style={styles.meta}>
+                  Currency: {bankAccount.currency} | Balance: {bankAccount.balance} | Status:{" "}
+                  {bankAccount.status}
+                </Text>
+              </View>
+            )}
+          </View>
         )}
 
         {auditLogs.length > 0 && (
-          <View style={{ marginTop: 14 }}>
-            <Text style={styles.label}>PostgreSQL Audit Trail ({auditLogs.length} events)</Text>
+          <View style={{ marginTop: 12 }}>
+            <Text style={styles.label}>PostgreSQL Audit Logs ({auditLogs.length})</Text>
             {auditLogs.map((log) => (
-              <Text key={log.id} style={styles.logItem}>
+              <Text key={log.id} style={styles.logLine}>
                 • {log.event_type} ({log.actor})
               </Text>
             ))}
@@ -360,9 +460,19 @@ export function KycScreen() {
 }
 
 const styles = StyleSheet.create({
-  container: { padding: 18, paddingBottom: 48, backgroundColor: "#f8fafc" },
-  title: { fontSize: 21, fontWeight: "700", color: "#0f172a" },
-  apiBanner: { fontSize: 12, color: "#475569", marginBottom: 12 },
+  container: { padding: 16, paddingBottom: 48, backgroundColor: "#f8fafc" },
+  title: { fontSize: 22, fontWeight: "700", color: "#0f172a" },
+  subText: { fontSize: 12, color: "#475569", marginBottom: 10 },
+  progressBox: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: "#dbeafe",
+    padding: 10,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  progressText: { fontSize: 13, color: "#1e3a8a", fontWeight: "600" },
   card: {
     backgroundColor: "#ffffff",
     borderRadius: 12,
@@ -371,8 +481,8 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#cbd5e1",
   },
-  stepTitle: { fontSize: 16, fontWeight: "700", color: "#0f172a", marginBottom: 8 },
-  row: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 10 },
+  cardTitle: { fontSize: 16, fontWeight: "700", color: "#0f172a", marginBottom: 8 },
+  row: { flexDirection: "row", flexWrap: "wrap", gap: 8, marginBottom: 8 },
   chip: {
     paddingHorizontal: 10,
     paddingVertical: 7,
@@ -394,76 +504,83 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: "#0f172a",
   },
-  primaryBtn: {
-    marginTop: 12,
+  btnPrimary: {
+    marginTop: 10,
     backgroundColor: "#2563eb",
     paddingVertical: 13,
     borderRadius: 10,
     alignItems: "center",
   },
-  disabledBtn: { backgroundColor: "#94a3b8" },
-  primaryBtnText: { color: "#ffffff", fontWeight: "700", fontSize: 14 },
-  previewImg: { width: "100%", height: 170, borderRadius: 8, marginTop: 12, resizeMode: "cover" },
-  meta: { fontSize: 12, color: "#334155", marginTop: 4 },
-  resultBox: {
+  btnDisabled: { backgroundColor: "#94a3b8" },
+  btnPrimaryText: { color: "#ffffff", fontWeight: "700", fontSize: 14 },
+  preview: { width: "100%", height: 175, borderRadius: 8, marginTop: 10, resizeMode: "cover" },
+  meta: { fontSize: 12, color: "#334155", marginTop: 3 },
+  warnText: { fontSize: 12, color: "#b91c1c", fontWeight: "600", marginTop: 3 },
+  infoBox: {
     marginTop: 12,
     padding: 10,
     borderRadius: 8,
-    backgroundColor: "#eff6ff",
+    backgroundColor: "#f1f5f9",
     borderWidth: 1,
-    borderColor: "#bfdbfe",
+    borderColor: "#cbd5e1",
   },
-  statusText: { fontSize: 15, fontWeight: "700", color: "#1d4ed8" },
-  lockedText: { fontSize: 13, color: "#b91c1c", fontWeight: "500" },
-  logItem: { fontSize: 12, color: "#475569", marginTop: 2 },
-  cameraContainer: { flex: 1, backgroundColor: "#000" },
+  bankBox: {
+    marginTop: 10,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: "#ecfdf5",
+    borderWidth: 1,
+    borderColor: "#86efac",
+  },
+  statusHighlight: { fontSize: 14, fontWeight: "700", color: "#0f172a" },
+  logLine: { fontSize: 12, color: "#475569", marginTop: 2 },
+  cameraRoot: { flex: 1, backgroundColor: "#000" },
   camera: { flex: 1 },
-  overlayBox: {
-    ...StyleSheet.absoluteFill,
+  cameraOverlay: {
+    ...StyleSheet.absoluteFillObject,
     justifyContent: "space-between",
     alignItems: "center",
-    paddingVertical: 48,
-    paddingHorizontal: 20,
+    paddingVertical: 44,
+    paddingHorizontal: 18,
   },
-  overlayTitle: {
+  guideBanner: {
     color: "#fff",
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: "700",
     textAlign: "center",
-    backgroundColor: "rgba(0,0,0,0.6)",
+    backgroundColor: "rgba(0,0,0,0.65)",
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 8,
   },
-  idFrameGuide: {
-    width: "92%",
-    height: 210,
+  idBox: {
+    width: "94%",
+    height: 215,
     borderWidth: 3,
     borderColor: "#38bdf8",
     borderRadius: 14,
   },
-  faceOvalGuide: {
+  faceOval: {
     width: 230,
     height: 300,
     borderWidth: 3,
     borderColor: "#4ade80",
     borderRadius: 150,
   },
-  camActions: { flexDirection: "row", gap: 12, width: "100%" },
-  cancelBtn: {
+  camButtonRow: { flexDirection: "row", gap: 12, width: "100%" },
+  camCancel: {
     flex: 1,
-    backgroundColor: "rgba(255,255,255,0.2)",
+    backgroundColor: "rgba(255,255,255,0.22)",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
   },
-  cancelBtnText: { color: "#fff", fontWeight: "700" },
-  captureBtn: {
+  camSnap: {
     flex: 2,
     backgroundColor: "#16a34a",
     paddingVertical: 14,
     borderRadius: 10,
     alignItems: "center",
   },
-  captureBtnText: { color: "#fff", fontWeight: "700" },
+  camBtnText: { color: "#fff", fontWeight: "700", fontSize: 14 },
 });
