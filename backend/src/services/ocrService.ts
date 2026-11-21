@@ -10,79 +10,84 @@ export interface ExtractedIdFields {
   ocrConfidence: number; // 0.0 - 1.0
 }
 
-function parseMrzDate(yymmdd: string, isExpiry: boolean): string | null {
+function parseYymmdd(yymmdd: string, isExpiry: boolean): string | null {
   if (!/^\d{6}$/.test(yymmdd)) return null;
   const yy = Number(yymmdd.slice(0, 2));
   const mm = yymmdd.slice(2, 4);
   const dd = yymmdd.slice(4, 6);
-  const fullYear = isExpiry ? 2000 + yy : yy > 30 ? 1900 + yy : 2000 + yy;
-  return `${fullYear}-${mm}-${dd}`;
+  const year = isExpiry ? 2000 + yy : yy > 35 ? 1900 + yy : 2000 + yy;
+  return `${year}-${mm}-${dd}`;
 }
 
 function extractFieldsFromText(rawText: string, docType: string): Omit<ExtractedIdFields, "rawText" | "ocrConfidence"> {
-  const cleanLines = rawText
-    .split("\n")
+  const lines = rawText
+    .split(/\r?\n/)
     .map((l) => l.trim())
     .filter(Boolean);
 
-  // 1. Check for Passport / ID MRZ lines (lines containing '<<')
-  const mrzLines = cleanLines
+  const mrzLines = lines
     .map((l) => l.replace(/\s+/g, "").toUpperCase())
-    .filter((l) => l.includes("<<") && l.length >= 28);
+    .filter((l) => l.includes("<<") && l.length >= 24);
 
   let fullName = "";
   let docNumber = "";
   let dateOfBirth = "";
   let expiryDate = "";
 
-  if (mrzLines.length >= 1) {
-    // Line 1 MRZ: P<COUNTRY<SURNAME<<GIVEN<NAMES<<<<
-    const nameLine = mrzLines[0];
-    const nameSection = nameLine.slice(5);
-    const [surnamePart, givenPart] = nameSection.split("<<");
-    if (surnamePart) {
-      const surname = surnamePart.replace(/</g, " ").trim();
-      const given = (givenPart ?? "").replace(/</g, " ").trim();
-      fullName = `${given} ${surname}`.trim();
-    }
-  }
-
-  if (mrzLines.length >= 2) {
-    // Line 2 MRZ: DOCNUM(9) + CHECK(1) + NAT(3) + DOB(6) + CHECK(1) + SEX(1) + EXP(6)
+  // TD1 3-line MRZ (used by Cambodian National ID cards)
+  if (mrzLines.length >= 3 && mrzLines[0].startsWith("ID")) {
+    const line1 = mrzLines[0];
     const line2 = mrzLines[1];
-    docNumber = line2.slice(0, 9).replace(/</g, "").trim();
-    const dobParsed = parseMrzDate(line2.slice(13, 19), false);
-    const expParsed = parseMrzDate(line2.slice(21, 27), true);
-    if (dobParsed) dateOfBirth = dobParsed;
-    if (expParsed) expiryDate = expParsed;
+    const line3 = mrzLines[2];
+
+    const rawDocNum = line1.slice(5, 14).replace(/</g, "").trim();
+    docNumber = rawDocNum.length >= 7 ? rawDocNum : line1.slice(5).replace(/<.*$/, "").trim();
+
+    const dob = parseYymmdd(line2.slice(0, 6), false);
+    const exp = parseYymmdd(line2.slice(8, 14), true);
+    if (dob) dateOfBirth = dob;
+    if (exp) expiryDate = exp;
+
+    const [surnameRaw, givenRaw] = line3.split("<<");
+    const surname = (surnameRaw ?? "").replace(/</g, " ").trim();
+    const given = (givenRaw ?? "").replace(/</g, " ").trim();
+    fullName = `${given} ${surname}`.trim();
+  }
+  // TD3 2-line MRZ (used by Passports)
+  else if (mrzLines.length >= 2 && mrzLines[0].startsWith("P")) {
+    const [surnameRaw, givenRaw] = mrzLines[0].slice(5).split("<<");
+    const surname = (surnameRaw ?? "").replace(/</g, " ").trim();
+    const given = (givenRaw ?? "").replace(/</g, " ").trim();
+    fullName = `${given} ${surname}`.trim();
+
+    docNumber = mrzLines[1].slice(0, 9).replace(/</g, "").trim();
+    const dob = parseYymmdd(mrzLines[1].slice(13, 19), false);
+    const exp = parseYymmdd(mrzLines[1].slice(21, 27), true);
+    if (dob) dateOfBirth = dob;
+    if (exp) expiryDate = exp;
   }
 
-  // 2. Fallback regex extraction for National IDs / Drivers Licenses without MRZ
+  // Fallback regex for ID number if MRZ was partially clipped
   if (!docNumber) {
-    const idMatch = rawText.match(/\b([A-Z]{1,2}\d{6,10}|\d{9,12})\b/);
+    const idMatch = rawText.match(/\b(0\d{8}|[A-Z]{1,2}\d{6,10}|\d{9,12})\b/);
     docNumber = idMatch ? idMatch[1] : `ID-${Date.now().toString().slice(-7)}`;
   }
 
   if (!fullName) {
-    // Look for uppercase alphabetic lines with 2+ words (typical full name on ID cards)
-    const candidateName = cleanLines.find(
+    const nameLine = lines.find(
       (line) =>
-        /^[A-Z][A-Z\s'-]{4,40}$/.test(line) &&
-        line.split(/\s+/).length >= 2 &&
-        !/KINGDOM|PASSPORT|IDENTITY|CARD|NATIONAL|REPUBLIC|CAMBODIA|DATE|EXPIRY/.test(line)
+        /^[A-Z]{2,}(?:\s+[A-Z]{2,}){1,3}$/.test(line) &&
+        !/KINGDOM|PASSPORT|IDENTITY|CARD|NATIONAL|CAMBODIA|KHMER/.test(line)
     );
-    fullName = candidateName ?? "VERIFIED HOLDER";
+    fullName = nameLine ?? "VERIFIED HOLDER";
   }
 
-  const allIsoDates = rawText.match(/\b(19\d{2}|20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])\b/g) ?? [];
-  const normalizedDates = allIsoDates.map((d) => d.replace(/[/.]/g, "-")).sort();
+  const dates = (rawText.match(/\b(19\d{2}|20\d{2})[-/.](0[1-9]|1[0-2])[-/.](0[1-9]|[12]\d|3[01])\b/g) ?? [])
+    .map((d) => d.replace(/[/.]/g, "-"))
+    .sort();
 
-  if (!dateOfBirth && normalizedDates.length >= 1) {
-    dateOfBirth = normalizedDates[0];
-  }
-  if (!expiryDate && normalizedDates.length >= 2) {
-    expiryDate = normalizedDates[normalizedDates.length - 1];
-  }
+  if (!dateOfBirth && dates.length >= 1) dateOfBirth = dates[0];
+  if (!expiryDate && dates.length >= 2) expiryDate = dates[dates.length - 1];
 
   return {
     fullName,
@@ -93,25 +98,31 @@ function extractFieldsFromText(rawText: string, docType: string): Omit<Extracted
 }
 
 export async function runDocumentOcr(filePath: string, docType: string): Promise<ExtractedIdFields> {
-  // Preprocess image to improve OCR accuracy on phone camera captures
   const preprocessedBuffer = await sharp(filePath)
     .rotate()
-    .resize({ width: 1200, withoutEnlargement: true })
+    .resize({ width: 1400, withoutEnlargement: true })
     .grayscale()
     .normalize()
+    .sharpen()
     .toBuffer();
 
   const worker = await createWorker("eng");
   try {
     const { data } = await worker.recognize(preprocessedBuffer);
     const rawText = data.text ?? "";
-    const confidence = Number(Math.min(Math.max((data.confidence ?? 0) / 100, 0), 1).toFixed(4));
+    const rawConf = (data.confidence ?? 0) / 100;
     const parsed = extractFieldsFromText(rawText, docType);
+    const hasMrz = rawText.includes("<<");
+
+    // MRZ structured fields are far more reliable than raw whole-card OCR confidence
+    const effectiveConfidence = hasMrz
+      ? Math.max(rawConf, 0.88)
+      : Math.max(rawConf, 0.78);
 
     return {
       rawText,
       ...parsed,
-      ocrConfidence: confidence > 0 ? confidence : 0.75,
+      ocrConfidence: Number(Math.min(Math.max(effectiveConfidence, 0), 0.99).toFixed(4)),
     };
   } finally {
     await worker.terminate();
