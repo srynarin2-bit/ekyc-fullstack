@@ -121,7 +121,7 @@ function extractDynamicFields(rawText: string, docType: string) {
       if (
         words.length >= 2 &&
         words.length <= 4 &&
-        !/ព្រះរាជាណាចក្រ|កម្ពុជា|អត្តសញ្ញាណប័ណ្ណ|សុពលភាព|ទីកន្លែង|អាសយដ្ឋាន|ភេទ|កំពស់/.test(khOnly)
+        !/ព្រះរាជាណាចក្រ|កម្ពុជា|អត្តសញ្ញាណប័ណ្ណ|សុពលភាព|ថ្ងៃខែឆ្នាំកំណើត​|ទីកន្លែងកំណើត|អាសយដ្ឋាន|ភេទ|កំពស់/.test(khOnly)
       ) {
         khmerName = khOnly;
         break;
