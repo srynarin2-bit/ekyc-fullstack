@@ -124,11 +124,14 @@ kycRouter.post("/sessions/:sessionId/liveness-verify-json", async (req, res) => 
     storageKey: z.string().min(1),
     neutralStorageKey: z.string().min(1),
     challengeStorageKey: z.string().min(1),
+    khmerName: z.string().trim().max(200).optional(),
     fullName: z.string().trim().min(1).max(200),
     docNumber: z.string().trim().min(1).max(128),
+    nationality: z.string().trim().max(16).optional(),
     dateOfBirth: z.string().trim().max(20),
     expiryDate: z.string().trim().max(20),
     ocrConfidence: z.coerce.number().min(0).max(1),
+    rawText: z.string().optional(),
   });
 
   const parsedBody = bodySchema.safeParse(req.body);
@@ -142,11 +145,14 @@ kycRouter.post("/sessions/:sessionId/liveness-verify-json", async (req, res) => 
     storageKey,
     neutralStorageKey,
     challengeStorageKey,
+    khmerName,
     fullName,
     docNumber,
+    nationality,
     dateOfBirth,
     expiryDate,
     ocrConfidence,
+    rawText,
   } = parsedBody.data;
 
   const neutralPath = path.resolve(neutralStorageKey);
@@ -176,7 +182,6 @@ kycRouter.post("/sessions/:sessionId/liveness-verify-json", async (req, res) => 
       return res.status(404).json({ error: "KYC session not found" });
     }
 
-    // Prevent reusing a document number already registered to another user account
     const duplicateDoc = await client.query(
       `SELECT id FROM users WHERE UPPER(doc_number) = UPPER($1) LIMIT 1`,
       [docNumber]
@@ -193,10 +198,22 @@ kycRouter.post("/sessions/:sessionId/liveness-verify-json", async (req, res) => 
 
     await client.query(
       `INSERT INTO kyc_documents (
-         session_id, doc_type, storage_key, full_name,
-         doc_number, date_of_birth, expiry_date, ocr_confidence
-       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
-      [sessionId, docType, storageKey, fullName, docNumber, safeDob, safeExp, ocrConfidence]
+         session_id, doc_type, storage_key, full_name, khmer_name,
+         doc_number, nationality, date_of_birth, expiry_date, ocr_confidence, raw_ocr_text
+       ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)`,
+      [
+        sessionId,
+        docType,
+        storageKey,
+        fullName,
+        khmerName ?? null,
+        docNumber,
+        nationality ?? "KHM",
+        safeDob,
+        safeExp,
+        ocrConfidence,
+        rawText ?? null,
+      ]
     );
 
     await client.query(

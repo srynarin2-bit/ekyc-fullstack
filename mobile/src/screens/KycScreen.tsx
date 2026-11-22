@@ -52,11 +52,14 @@ export function KycScreen() {
   const [session, setSession] = useState<KycSession | null>(null);
   const [idPhotoUri, setIdPhotoUri] = useState<string | null>(null);
   const [storageKey, setStorageKey] = useState<string>("");
+  const [khmerName, setKhmerName] = useState<string>("");
   const [fullName, setFullName] = useState<string>("");
   const [docNumber, setDocNumber] = useState<string>("");
   const [nationality, setNationality] = useState<string>("");
   const [dateOfBirth, setDateOfBirth] = useState<string>("");
   const [expiryDate, setExpiryDate] = useState<string>("");
+  const [rawOcrText, setRawOcrText] = useState<string>("");
+  const [showRawText, setShowRawText] = useState<boolean>(false);
   const [ocrConfidence, setOcrConfidence] = useState<number>(0);
   const [mrzValid, setMrzValid] = useState<boolean>(false);
   const [ocrIssues, setOcrIssues] = useState<string[]>([]);
@@ -77,16 +80,18 @@ export function KycScreen() {
   const [busy, setBusy] = useState<boolean>(false);
   const [statusMessage, setStatusMessage] = useState<string>("");
 
-  // Clears prior user/session/bank state so every new ID scan starts cleanly
   const resetForNewScan = () => {
     setSession(null);
     setIdPhotoUri(null);
     setStorageKey("");
+    setKhmerName("");
     setFullName("");
     setDocNumber("");
     setNationality("");
     setDateOfBirth("");
     setExpiryDate("");
+    setRawOcrText("");
+    setShowRawText(false);
     setOcrConfidence(0);
     setMrzValid(false);
     setOcrIssues([]);
@@ -121,7 +126,7 @@ export function KycScreen() {
   const handleCaptureId = async () => {
     if (!cameraRef.current || busy) return;
     setBusy(true);
-    setStatusMessage("Capturing ID photo & running OCR...");
+    setStatusMessage("Capturing ID photo & running Khmer + English OCR...");
 
     try {
       const rawPhoto = await cameraRef.current.takePictureAsync({
@@ -140,11 +145,13 @@ export function KycScreen() {
 
       const res = await uploadIdForOcr(activeSession.id, docType, sharpUri);
       setStorageKey(res.storageKey);
+      setKhmerName(res.extracted.khmerName ?? "");
       setFullName(res.extracted.fullName);
       setDocNumber(res.extracted.docNumber);
       setNationality(res.extracted.nationality);
       setDateOfBirth(res.extracted.dateOfBirth);
       setExpiryDate(res.extracted.expiryDate);
+      setRawOcrText(res.extracted.rawText ?? "");
       setOcrConfidence(res.extracted.ocrConfidence);
       setMrzValid(res.extracted.mrzCheckValid);
       setOcrIssues(res.extracted.validationIssues);
@@ -159,7 +166,9 @@ export function KycScreen() {
 
       Alert.alert(
         "OCR Scan Finished",
-        `Name: ${res.extracted.fullName}\nID #: ${res.extracted.docNumber}\nConfidence: ${(
+        `${res.extracted.khmerName ? `Khmer Name: ${res.extracted.khmerName}\n` : ""}Name: ${
+          res.extracted.fullName
+        }\nID #: ${res.extracted.docNumber}\nConfidence: ${(
           res.extracted.ocrConfidence * 100
         ).toFixed(1)}%${issuesText}`
       );
@@ -198,11 +207,14 @@ export function KycScreen() {
         const result = await verifyLivenessAndSubmit(session.id, neutralSelfieUri, compressedSelfie, {
           docType,
           storageKey,
+          khmerName: khmerName.trim() || undefined,
           fullName: fullName.trim(),
           docNumber: docNumber.trim(),
+          nationality: nationality.trim() || undefined,
           dateOfBirth: dateOfBirth.trim(),
           expiryDate: expiryDate.trim(),
           ocrConfidence,
+          rawText: rawOcrText || undefined,
         });
 
         setSession(result.session);
@@ -362,7 +374,15 @@ export function KycScreen() {
               </Text>
             ))}
 
-            <Text style={styles.label}>Full Name</Text>
+            <Text style={styles.label}>Khmer Name (ឈ្មោះភាសាខ្មែរ)</Text>
+            <TextInput
+              style={styles.input}
+              value={khmerName}
+              onChangeText={setKhmerName}
+              placeholder="Detected Khmer name (if present)"
+            />
+
+            <Text style={styles.label}>Full Name (Latin / MRZ)</Text>
             <TextInput style={styles.input} value={fullName} onChangeText={setFullName} />
 
             <Text style={styles.label}>Document Number</Text>
@@ -373,6 +393,17 @@ export function KycScreen() {
 
             <Text style={styles.label}>Expiry Date (YYYY-MM-DD)</Text>
             <TextInput style={styles.input} value={expiryDate} onChangeText={setExpiryDate} />
+
+            {rawOcrText !== "" && (
+              <View style={{ marginTop: 10 }}>
+                <TouchableOpacity onPress={() => setShowRawText((prev) => !prev)}>
+                  <Text style={styles.toggleRawText}>
+                    {showRawText ? "Hide Raw OCR Text" : "Show Raw OCR Text (Khmer + English)"}
+                  </Text>
+                </TouchableOpacity>
+                {showRawText && <Text style={styles.rawBox}>{rawOcrText}</Text>}
+              </View>
+            )}
           </View>
         )}
       </View>
@@ -528,6 +559,16 @@ const styles = StyleSheet.create({
     paddingVertical: 9,
     fontSize: 14,
     color: "#0f172a",
+  },
+  toggleRawText: { fontSize: 12, fontWeight: "700", color: "#1d4ed8" },
+  rawBox: {
+    marginTop: 6,
+    padding: 10,
+    borderRadius: 8,
+    backgroundColor: "#0f172a",
+    color: "#e2e8f0",
+    fontSize: 11,
+    lineHeight: 16,
   },
   btnPrimary: {
     marginTop: 10,

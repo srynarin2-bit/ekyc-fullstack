@@ -118,11 +118,14 @@ export async function verifyLivenessAndSubmit(
   metadata: {
     docType: DocType;
     storageKey: string;
+    khmerName?: string;
     fullName: string;
     docNumber: string;
+    nationality?: string;
     dateOfBirth: string;
     expiryDate: string;
     ocrConfidence: number;
+    rawText?: string;
   }
 ): Promise<{ session: KycSession; biometrics: BiometricsResult }> {
   const neutralRes = await uploadSingleFileWithTimeout<{ storageKey: string }>(

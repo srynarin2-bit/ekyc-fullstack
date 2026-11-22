@@ -16,6 +16,7 @@ export interface ExtractedOcrResponse {
   storageKey: string;
   extracted: {
     rawText: string;
+    khmerName?: string;
     fullName: string;
     docNumber: string;
     nationality: string;
